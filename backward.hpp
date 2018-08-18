@@ -80,6 +80,9 @@
 #include <vector>
 #include <limits>
 
+#include <Python.h>
+#include <frameobject.h>
+
 #if defined(BACKWARD_SYSTEM_LINUX)
 
 // On linux, backtrace can back-trace or "walk" the stack using the following
@@ -3536,11 +3539,34 @@ private:
 
 	template <typename ST>
 		void print_stacktrace(ST& st, std::ostream& os, Colorize& colorize) {
+            ResolvedTrace rt[st.size()];
+
 			print_header(os, st.thread_id());
 			_resolver.load_stacktrace(st);
-			for (size_t trace_idx = st.size(); trace_idx > 0; --trace_idx) {
-				print_trace(os, _resolver.resolve(st[trace_idx-1]), colorize);
-			}
+            
+            // Resolve c/c++ trace until python frame
+            int64_t python_trace_idx = -1;
+            for (size_t trace_idx = 0; trace_idx < st.size(); ++trace_idx) {
+                rt[trace_idx] = _resolver.resolve(st[trace_idx]);
+                if (is_python_trace(rt[trace_idx])) {
+                    python_trace_idx = trace_idx;
+                    break;
+                }
+            }
+
+            // Resolve python trace
+            int64_t top_frame = st.size();
+            if (python_trace_idx != -1) {
+                int64_t resolved = resolve_python_trace(rt, python_trace_idx, 
+                    top_frame);
+                if (resolved > 0)
+                    top_frame = python_trace_idx + resolved;
+            }
+
+            // Print python and c/c++ frame
+            for (size_t trace_idx = top_frame; trace_idx > 0; --trace_idx) {
+			    print_trace(os, rt[trace_idx-1], colorize);
+            }
 		}
 
 	template <typename IT>
@@ -3558,6 +3584,58 @@ private:
 		}
 		os << ":\n";
 	}
+
+    bool is_python_trace(const ResolvedTrace& trace) {
+        if ((strcmp(trace.object_function.c_str(),
+                "PyCFunction_Call") == 0)          ||
+            (strcmp(trace.object_function.c_str(),
+                "_PyCFunction_FastCallDict") == 0) ||
+            (strcmp(trace.object_function.c_str(),
+                "_PyEval_EvalFrameDefault") == 0)  ||
+            (strcmp(trace.object_function.c_str(),
+                "wrapper_call") == 0))
+            return true;
+        else
+            return false;
+    }
+
+    bool is_python_eval_frame(const ResolvedTrace& trace) {
+        if ((strcmp(trace.object_function.c_str(),
+            "_PyEval_EvalFrameDefault") == 0))
+            return true;
+        else
+            return false;
+    }
+
+    int resolve_python_trace(ResolvedTrace *traces, int64_t pos, int64_t n) {
+        PyGILState_STATE gstate = PyGILState_Ensure();
+        PyThreadState *tstate = PyThreadState_Get();
+        int resolved = 0;
+
+        if (NULL != tstate && NULL != tstate->frame) {
+            PyFrameObject *frame = tstate->frame;
+
+            for (int64_t i = pos; i < n; ++i) {
+                int line = PyCode_Addr2Line(frame->f_code, frame->f_lasti);
+                const char *filename = PyUnicode_AsUTF8(frame->f_code->co_filename);
+                const char *function = PyUnicode_AsUTF8 (frame->f_code->co_name);
+
+                traces[i].idx = i;
+                traces[i].addr = nullptr;
+                traces[i].source.line = line;
+                traces[i].source.filename = std::string(filename);
+                traces[i].source.function = std::string(function);
+
+                resolved++;
+                frame = frame->f_back;
+                if (frame == nullptr)
+                    break;
+            }
+        }
+
+        PyGILState_Release(gstate);
+        return resolved;
+    }
 
 	void print_trace(std::ostream& os, const ResolvedTrace& trace,
 			Colorize& colorize) {
