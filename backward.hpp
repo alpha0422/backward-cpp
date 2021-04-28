@@ -3595,7 +3595,9 @@ private:
             (strcmp(trace.object_function.c_str(),
                 "wrapper_call") == 0)              ||
             (strcmp(trace.object_function.c_str(),
-                "PyEval_EvalFrameEx") == 0))
+                "PyEval_EvalFrameEx") == 0)        ||
+            (strstr(trace.object_function.c_str(),
+                "cfunction_vectorcall")))
             return true;
         else
             return false;
